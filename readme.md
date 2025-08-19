@@ -4,4 +4,5 @@ Barebones implementation of a coding agent.
 - Edit files
 - List files
 - Create files
-- Add files as main context for the llm
+- Web search
+- Add files as main context for the llm via @
