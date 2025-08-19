@@ -1,0 +1,473 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/invopop/jsonschema"
+)
+
+//App wide structs
+
+type Agent struct {
+	client         *anthropic.Client
+	getUserMessage func() (string, bool)
+	tools          []ToolDefinition
+}
+
+type ToolDefinition struct {
+	Name        string                         `json:"name"`
+	Description string                         `json:"description"`
+	InputSchema anthropic.ToolInputSchemaParam `json:"input_schema"`
+	Function    func(input json.RawMessage) (string, error)
+}
+
+//Entry point
+
+func main() {
+	client := anthropic.NewClient()
+
+	scanner := bufio.NewScanner(os.Stdin)
+	getUserMessage := func() (string, bool) {
+		if !scanner.Scan() {
+			return "", false
+		}
+		return scanner.Text(), true
+	}
+
+	tools := []ToolDefinition{ReadFileDefinition, ListFilesDefinition, EditFileDefinition}
+	agent := NewAgent(&client, getUserMessage, tools)
+	err := agent.Run(context.TODO())
+	if err != nil {
+		fmt.Printf("Error: %s\n", err.Error())
+	}
+}
+
+func NewAgent(client *anthropic.Client, getUserMessage func() (string, bool), tools []ToolDefinition) *Agent {
+	return &Agent{
+		client:         client,
+		getUserMessage: getUserMessage,
+		tools:          tools,
+	}
+}
+
+//Run main loop
+
+func (a *Agent) Run(ctx context.Context) error {
+	conversation := []anthropic.MessageParam{}
+
+	fmt.Println("Chat with Claude (use 'ctrl-c' to quit)")
+	fmt.Println("Tip: Use @filename to include files in your context (supports fuzzy matching)")
+
+	readUserInput := true
+	for {
+		if readUserInput {
+			fmt.Print("\u001b[94mYou\u001b[0m: ")
+			userInput, ok := a.getUserMessage()
+			if !ok {
+				break
+			}
+
+			// Parse file mentions and include file content
+			processedInput, mentionedFiles, err := parseFileMentions(userInput)
+			if err != nil {
+				fmt.Printf("Error processing file mentions: %s\n", err.Error())
+				continue
+			}
+
+			// Show user which files were included
+			if len(mentionedFiles) > 0 {
+				fmt.Printf("\u001b[92mIncluded files\u001b[0m: %s\n", strings.Join(mentionedFiles, ", "))
+			}
+
+			userMessage := anthropic.NewUserMessage(anthropic.NewTextBlock(processedInput))
+			conversation = append(conversation, userMessage)
+		}
+
+		message, err := a.runInference(ctx, conversation)
+		if err != nil {
+			return err
+		}
+		conversation = append(conversation, message.ToParam())
+
+		toolResults := []anthropic.ContentBlockParamUnion{}
+		for _, content := range message.Content {
+			switch content.Type {
+			case "text":
+				fmt.Printf("\u001b[93mClaude\u001b[0m: %s\n", content.Text)
+			case "tool_use":
+				result := a.executeTool(content.ID, content.Name, content.Input)
+				toolResults = append(toolResults, result)
+			}
+		}
+		if len(toolResults) == 0 {
+			readUserInput = true
+			continue
+		}
+		readUserInput = false
+		conversation = append(conversation, anthropic.NewUserMessage(toolResults...))
+	}
+
+	return nil
+}
+
+// ------------------------------------------------------------
+//Execute tool and run inference (connecting to claude)
+// ------------------------------------------------------------
+
+func (a *Agent) executeTool(id, name string, input json.RawMessage) anthropic.ContentBlockParamUnion {
+	var toolDef ToolDefinition
+	var found bool
+	for _, tool := range a.tools {
+		if tool.Name == name {
+			toolDef = tool
+			found = true
+			break
+		}
+	}
+	if !found {
+		return anthropic.NewToolResultBlock(id, "tool not found", true)
+	}
+
+	fmt.Printf("\u001b[92mtool\u001b[0m: %s(%s)\n", name, input)
+	response, err := toolDef.Function(input)
+	if err != nil {
+		return anthropic.NewToolResultBlock(id, err.Error(), true)
+	}
+	return anthropic.NewToolResultBlock(id, response, false)
+}
+
+func (a *Agent) runInference(ctx context.Context, conversation []anthropic.MessageParam) (*anthropic.Message, error) {
+	anthropicTools := []anthropic.ToolUnionParam{}
+	for _, tool := range a.tools {
+		anthropicTools = append(anthropicTools, anthropic.ToolUnionParam{
+			OfTool: &anthropic.ToolParam{
+				Name:        tool.Name,
+				Description: anthropic.String(tool.Description),
+				InputSchema: tool.InputSchema,
+			},
+		})
+	}
+
+	message, err := a.client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:     anthropic.ModelClaude3_5HaikuLatest,
+		MaxTokens: int64(1024),
+		Messages:  conversation,
+		Tools:     anthropicTools,
+	})
+	return message, err
+}
+
+// ------------------------------------------------------------
+// Read files
+// ------------------------------------------------------------
+
+var ReadFileDefinition = ToolDefinition{
+	Name:        "read_file",
+	Description: "Read the contents of a given relative file path. Use this when you want to see what's inside a file. Do not use this with directory names.",
+	InputSchema: ReadFileInputSchema,
+	Function:    ReadFile,
+}
+
+type ReadFileInput struct {
+	Path string `json:"path" jsonschema_description:"The relative path of a file in the working directory."`
+}
+
+var ReadFileInputSchema = GenerateSchema[ReadFileInput]()
+
+func ReadFile(input json.RawMessage) (string, error) {
+	readFileInput := ReadFileInput{}
+	err := json.Unmarshal(input, &readFileInput)
+	if err != nil {
+		panic(err)
+	}
+
+	content, err := os.ReadFile(readFileInput.Path)
+	if err != nil {
+		return "", err
+	}
+	return string(content), nil
+}
+
+func GenerateSchema[T any]() anthropic.ToolInputSchemaParam {
+	reflector := jsonschema.Reflector{
+		AllowAdditionalProperties: false,
+		DoNotReference:            true,
+	}
+	var v T
+
+	schema := reflector.Reflect(v)
+
+	return anthropic.ToolInputSchemaParam{
+		Properties: schema.Properties,
+	}
+}
+
+// ------------------------------------------------------------
+// List files
+// ------------------------------------------------------------
+
+var ListFilesDefinition = ToolDefinition{
+	Name:        "list_files",
+	Description: "List files and directories at a given path. If no path is provided, lists files in the current directory.",
+	InputSchema: ListFilesInputSchema,
+	Function:    ListFiles,
+}
+
+type ListFilesInput struct {
+	Path string `json:"path,omitempty" jsonschema_description:"Optional relative path to list files from. Defaults to current directory if not provided."`
+}
+
+var ListFilesInputSchema = GenerateSchema[ListFilesInput]()
+
+func ListFiles(input json.RawMessage) (string, error) {
+	listFilesInput := ListFilesInput{}
+	err := json.Unmarshal(input, &listFilesInput)
+	if err != nil {
+		panic(err)
+	}
+
+	dir := "."
+	if listFilesInput.Path != "" {
+		dir = listFilesInput.Path
+	}
+
+	var files []string
+	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		relPath, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+
+		if relPath != "." {
+			if info.IsDir() {
+				files = append(files, relPath+"/")
+			} else {
+				files = append(files, relPath)
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	result, err := json.Marshal(files)
+	if err != nil {
+		return "", err
+	}
+
+	return string(result), nil
+}
+
+// ------------------------------------------------------------
+//Create and edit files
+// ------------------------------------------------------------
+
+var EditFileDefinition = ToolDefinition{
+	Name: "edit_file",
+	Description: `Make edits to a text file.
+
+Replaces 'old_str' with 'new_str' in the given file. 'old_str' and 'new_str' MUST be different from each other.
+
+If the file specified with path doesn't exist, it will be created.
+`,
+	InputSchema: EditFileInputSchema,
+	Function:    EditFile,
+}
+
+type EditFileInput struct {
+	Path   string `json:"path" jsonschema_description:"The path to the file"`
+	OldStr string `json:"old_str" jsonschema_description:"Text to search for - must match exactly and must only have one match exactly"`
+	NewStr string `json:"new_str" jsonschema_description:"Text to replace old_str with"`
+}
+
+var EditFileInputSchema = GenerateSchema[EditFileInput]()
+
+func EditFile(input json.RawMessage) (string, error) {
+	editFileInput := EditFileInput{}
+	err := json.Unmarshal(input, &editFileInput)
+	if err != nil {
+		return "", err
+	}
+
+	if editFileInput.Path == "" || editFileInput.OldStr == editFileInput.NewStr {
+		return "", fmt.Errorf("invalid input parameters")
+	}
+
+	content, err := os.ReadFile(editFileInput.Path)
+	if err != nil {
+		if os.IsNotExist(err) && editFileInput.OldStr == "" {
+			return createNewFile(editFileInput.Path, editFileInput.NewStr)
+		}
+		return "", err
+	}
+
+	oldContent := string(content)
+	newContent := strings.Replace(oldContent, editFileInput.OldStr, editFileInput.NewStr, -1)
+
+	if oldContent == newContent && editFileInput.OldStr != "" {
+		return "", fmt.Errorf("old_str not found in file")
+	}
+
+	err = os.WriteFile(editFileInput.Path, []byte(newContent), 0644)
+	if err != nil {
+		return "", err
+	}
+
+	return "OK", nil
+}
+
+func createNewFile(filePath, content string) (string, error) {
+	dir := path.Dir(filePath)
+	if dir != "." {
+		err := os.MkdirAll(dir, 0755)
+		if err != nil {
+			return "", fmt.Errorf("failed to create directory: %w", err)
+		}
+	}
+
+	err := os.WriteFile(filePath, []byte(content), 0644)
+	if err != nil {
+		return "", fmt.Errorf("failed to create file: %w", err)
+	}
+
+	return fmt.Sprintf("Successfully created file %s", filePath), nil
+}
+
+// ------------------------------------------------------------
+// Add files as main context of the session
+// ------------------------------------------------------------
+
+type FileMatch struct {
+	Path  string
+	Score int
+}
+
+func fuzzySearchFiles(pattern string, searchDir string) ([]FileMatch, error) {
+	var allFiles []string
+	var matches []FileMatch
+
+	// Walk through all files in the directory
+	err := filepath.Walk(searchDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			relPath, err := filepath.Rel(searchDir, path)
+			if err != nil {
+				return err
+			}
+			allFiles = append(allFiles, relPath)
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Score each file based on fuzzy match
+	for _, file := range allFiles {
+		score := calculateFuzzyScore(pattern, file)
+		if score > 0 {
+			matches = append(matches, FileMatch{Path: file, Score: score})
+		}
+	}
+
+	// Sort by score (higher is better)
+	sort.Slice(matches, func(i, j int) bool {
+		return matches[i].Score > matches[j].Score
+	})
+
+	return matches, nil
+}
+
+func calculateFuzzyScore(pattern, text string) int {
+	pattern = strings.ToLower(pattern)
+	text = strings.ToLower(text)
+
+	// Exact match gets highest score
+	if strings.Contains(text, pattern) {
+		return 1000 + len(pattern)
+	}
+
+	// Check if all characters in pattern exist in text in order
+	patternIndex := 0
+	score := 0
+
+	for _, char := range text {
+		if patternIndex < len(pattern) && rune(pattern[patternIndex]) == char {
+			patternIndex++
+			score += 10
+		}
+	}
+
+	// Only return score if we matched all pattern characters
+	if patternIndex == len(pattern) {
+		return score
+	}
+
+	return 0
+}
+
+func parseFileMentions(input string) (string, []string, error) {
+	// Regex to find @filename patterns
+	re := regexp.MustCompile(`@([^\s@]+)`)
+	matches := re.FindAllStringSubmatch(input, -1)
+
+	var filePaths []string
+	var fileContents []string
+	modifiedInput := input
+
+	for _, match := range matches {
+		pattern := match[1]
+
+		// Perform fuzzy search
+		searchMatches, err := fuzzySearchFiles(pattern, ".")
+		if err != nil {
+			return input, nil, fmt.Errorf("error searching for files: %w", err)
+		}
+
+		if len(searchMatches) > 0 {
+			// Take the best match
+			bestMatch := searchMatches[0]
+			filePaths = append(filePaths, bestMatch.Path)
+
+			// Read file content
+			content, err := os.ReadFile(bestMatch.Path)
+			if err != nil {
+				return input, nil, fmt.Errorf("error reading file %s: %w", bestMatch.Path, err)
+			}
+
+			fileContents = append(fileContents, fmt.Sprintf("=== Content of %s ===\n%s\n=== End of %s ===\n",
+				bestMatch.Path, string(content), bestMatch.Path))
+
+			// Replace @pattern with a more descriptive reference
+			modifiedInput = strings.Replace(modifiedInput, match[0], fmt.Sprintf("[%s]", bestMatch.Path), 1)
+		}
+	}
+
+	// If we found files, prepend their content to the user message
+	if len(fileContents) > 0 {
+		contextHeader := fmt.Sprintf("Context: The following files have been included for reference:\n\n%s\n",
+			strings.Join(fileContents, "\n"))
+		modifiedInput = contextHeader + "User Request: " + modifiedInput
+	}
+
+	return modifiedInput, filePaths, nil
+}
