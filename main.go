@@ -39,16 +39,20 @@ func main() {
 	scanner := bufio.NewScanner(os.Stdin)
 	getUserMessage := func() (string, bool) {
 		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				fmt.Printf("Error reading input: %s\n", err.Error())
+			}
 			return "", false
 		}
 		return scanner.Text(), true
 	}
 
-	tools := []ToolDefinition{ReadFileDefinition, ListFilesDefinition, EditFileDefinition}
+	tools := []ToolDefinition{ReadFileDefinition, ListFilesDefinition, EditFileDefinition, SearchDefinition}
 	agent := NewAgent(&client, getUserMessage, tools)
 	err := agent.Run(context.TODO())
 	if err != nil {
-		fmt.Printf("Error: %s\n", err.Error())
+		fmt.Printf("Agent error: %s\n", err.Error())
+		os.Exit(1)
 	}
 }
 
@@ -95,7 +99,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 		message, err := a.runInference(ctx, conversation)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to run inference: %w", err)
 		}
 		conversation = append(conversation, message.ToParam())
 
@@ -135,13 +139,13 @@ func (a *Agent) executeTool(id, name string, input json.RawMessage) anthropic.Co
 		}
 	}
 	if !found {
-		return anthropic.NewToolResultBlock(id, "tool not found", true)
+		return anthropic.NewToolResultBlock(id, fmt.Sprintf("tool '%s' not found", name), true)
 	}
 
 	fmt.Printf("\u001b[92mtool\u001b[0m: %s(%s)\n", name, input)
 	response, err := toolDef.Function(input)
 	if err != nil {
-		return anthropic.NewToolResultBlock(id, err.Error(), true)
+		return anthropic.NewToolResultBlock(id, fmt.Sprintf("tool '%s' failed: %s", name, err.Error()), true)
 	}
 	return anthropic.NewToolResultBlock(id, response, false)
 }
@@ -188,12 +192,12 @@ func ReadFile(input json.RawMessage) (string, error) {
 	readFileInput := ReadFileInput{}
 	err := json.Unmarshal(input, &readFileInput)
 	if err != nil {
-		panic(err)
+		return "", fmt.Errorf("failed to parse read file input: %w", err)
 	}
 
 	content, err := os.ReadFile(readFileInput.Path)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to read file %s: %w", readFileInput.Path, err)
 	}
 	return string(content), nil
 }
@@ -233,7 +237,7 @@ func ListFiles(input json.RawMessage) (string, error) {
 	listFilesInput := ListFilesInput{}
 	err := json.Unmarshal(input, &listFilesInput)
 	if err != nil {
-		panic(err)
+		return "", fmt.Errorf("failed to parse list files input: %w", err)
 	}
 
 	dir := "."
@@ -263,12 +267,12 @@ func ListFiles(input json.RawMessage) (string, error) {
 	})
 
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to walk directory %s: %w", dir, err)
 	}
 
 	result, err := json.Marshal(files)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to marshal file list: %w", err)
 	}
 
 	return string(result), nil
@@ -302,11 +306,15 @@ func EditFile(input json.RawMessage) (string, error) {
 	editFileInput := EditFileInput{}
 	err := json.Unmarshal(input, &editFileInput)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to parse edit file input: %w", err)
 	}
 
-	if editFileInput.Path == "" || editFileInput.OldStr == editFileInput.NewStr {
-		return "", fmt.Errorf("invalid input parameters")
+	if editFileInput.Path == "" {
+		return "", fmt.Errorf("file path cannot be empty")
+	}
+
+	if editFileInput.OldStr == editFileInput.NewStr {
+		return "", fmt.Errorf("old_str and new_str cannot be identical")
 	}
 
 	content, err := os.ReadFile(editFileInput.Path)
@@ -314,19 +322,19 @@ func EditFile(input json.RawMessage) (string, error) {
 		if os.IsNotExist(err) && editFileInput.OldStr == "" {
 			return createNewFile(editFileInput.Path, editFileInput.NewStr)
 		}
-		return "", err
+		return "", fmt.Errorf("failed to read file %s: %w", editFileInput.Path, err)
 	}
 
 	oldContent := string(content)
 	newContent := strings.Replace(oldContent, editFileInput.OldStr, editFileInput.NewStr, -1)
 
 	if oldContent == newContent && editFileInput.OldStr != "" {
-		return "", fmt.Errorf("old_str not found in file")
+		return "", fmt.Errorf("old_str '%s' not found in file %s", editFileInput.OldStr, editFileInput.Path)
 	}
 
 	err = os.WriteFile(editFileInput.Path, []byte(newContent), 0644)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to write file %s: %w", editFileInput.Path, err)
 	}
 
 	return "OK", nil
@@ -365,12 +373,14 @@ func fuzzySearchFiles(pattern string, searchDir string) ([]FileMatch, error) {
 	// Walk through all files in the directory
 	err := filepath.Walk(searchDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return err
+			// Log but don't fail on individual file access errors
+			fmt.Printf("Warning: skipping file due to error: %v\n", err)
+			return nil
 		}
 		if !info.IsDir() {
 			relPath, err := filepath.Rel(searchDir, path)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to get relative path for '%s': %w", path, err)
 			}
 			allFiles = append(allFiles, relPath)
 		}
@@ -378,7 +388,7 @@ func fuzzySearchFiles(pattern string, searchDir string) ([]FileMatch, error) {
 	})
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to walk directory '%s': %w", searchDir, err)
 	}
 
 	// Score each file based on fuzzy match
@@ -440,7 +450,7 @@ func parseFileMentions(input string) (string, []string, error) {
 		// Perform fuzzy search
 		searchMatches, err := fuzzySearchFiles(pattern, ".")
 		if err != nil {
-			return input, nil, fmt.Errorf("error searching for files: %w", err)
+			return input, nil, fmt.Errorf("failed to search for files matching pattern '%s': %w", pattern, err)
 		}
 
 		if len(searchMatches) > 0 {
@@ -451,7 +461,7 @@ func parseFileMentions(input string) (string, []string, error) {
 			// Read file content
 			content, err := os.ReadFile(bestMatch.Path)
 			if err != nil {
-				return input, nil, fmt.Errorf("error reading file %s: %w", bestMatch.Path, err)
+				return input, nil, fmt.Errorf("failed to read file '%s' (matched pattern '%s'): %w", bestMatch.Path, pattern, err)
 			}
 
 			fileContents = append(fileContents, fmt.Sprintf("=== Content of %s ===\n%s\n=== End of %s ===\n",
