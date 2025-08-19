@@ -2,6 +2,9 @@
 .env
 .env.*
 
+*.db
+
+
 # Secret / keys
 *.key
 *.pem

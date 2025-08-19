@@ -7,6 +7,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.9.1
 	github.com/go-shiori/go-readability v0.0.0-20250217085726-9f5bf5ca7612
 	github.com/invopop/jsonschema v0.13.0
+	github.com/mattn/go-sqlite3 v1.14.32
 )
 
 require (

@@ -19,9 +19,13 @@ import (
 //App wide structs
 
 type Agent struct {
-	client         *anthropic.Client
-	getUserMessage func() (string, bool)
-	tools          []ToolDefinition
+	client           *anthropic.Client
+	getUserMessage   func() (string, bool)
+	tools            []ToolDefinition
+	database         *Database
+	currentSessionID int
+	conversation     []anthropic.MessageParam
+	commandRegistry  *CommandRegistry
 }
 
 type ToolDefinition struct {
@@ -36,6 +40,14 @@ type ToolDefinition struct {
 func main() {
 	client := anthropic.NewClient()
 
+	// Initialize database
+	database, err := NewDatabase("conversations.db")
+	if err != nil {
+		fmt.Printf("Failed to initialize database: %s\n", err.Error())
+		os.Exit(1)
+	}
+	defer database.Close()
+
 	scanner := bufio.NewScanner(os.Stdin)
 	getUserMessage := func() (string, bool) {
 		if !scanner.Scan() {
@@ -48,29 +60,42 @@ func main() {
 	}
 
 	tools := []ToolDefinition{ReadFileDefinition, ListFilesDefinition, EditFileDefinition, SearchDefinition}
-	agent := NewAgent(&client, getUserMessage, tools)
-	err := agent.Run(context.TODO())
+	agent := NewAgent(&client, getUserMessage, tools, database)
+	err = agent.Run(context.TODO())
 	if err != nil {
 		fmt.Printf("Agent error: %s\n", err.Error())
 		os.Exit(1)
 	}
 }
 
-func NewAgent(client *anthropic.Client, getUserMessage func() (string, bool), tools []ToolDefinition) *Agent {
-	return &Agent{
-		client:         client,
-		getUserMessage: getUserMessage,
-		tools:          tools,
+func NewAgent(client *anthropic.Client, getUserMessage func() (string, bool), tools []ToolDefinition, database *Database) *Agent {
+	agent := &Agent{
+		client:          client,
+		getUserMessage:  getUserMessage,
+		tools:           tools,
+		database:        database,
+		conversation:    []anthropic.MessageParam{},
+		commandRegistry: NewCommandRegistry(),
 	}
+
+	// Create or load default session
+	session, err := database.CreateSession("")
+	if err != nil {
+		fmt.Printf("Warning: Failed to create default session: %s\n", err.Error())
+		agent.currentSessionID = 0
+	} else {
+		agent.currentSessionID = session.ID
+	}
+
+	return agent
 }
 
 //Run main loop
 
 func (a *Agent) Run(ctx context.Context) error {
-	conversation := []anthropic.MessageParam{}
-
 	fmt.Println("Chat with Claude (use 'ctrl-c' to quit)")
 	fmt.Println("Tip: Use @filename to include files in your context (supports fuzzy matching)")
+	fmt.Println("Commands: /session, /help")
 
 	readUserInput := true
 	for {
@@ -79,6 +104,16 @@ func (a *Agent) Run(ctx context.Context) error {
 			userInput, ok := a.getUserMessage()
 			if !ok {
 				break
+			}
+
+			// Check if this is a command
+			isCommand, err := a.commandRegistry.ExecuteCommand(userInput, a)
+			if err != nil {
+				fmt.Printf("Command error: %s\n", err.Error())
+				continue
+			}
+			if isCommand {
+				continue // Command was executed, don't process as regular message
 			}
 
 			// Parse file mentions and include file content
@@ -94,14 +129,30 @@ func (a *Agent) Run(ctx context.Context) error {
 			}
 
 			userMessage := anthropic.NewUserMessage(anthropic.NewTextBlock(processedInput))
-			conversation = append(conversation, userMessage)
+			a.conversation = append(a.conversation, userMessage)
+
+			// Save user message to database
+			if a.currentSessionID > 0 {
+				err = a.saveMessageToDB(userMessage)
+				if err != nil {
+					fmt.Printf("Warning: Failed to save user message: %s\n", err.Error())
+				}
+			}
 		}
 
-		message, err := a.runInference(ctx, conversation)
+		message, err := a.runInference(ctx, a.conversation)
 		if err != nil {
 			return fmt.Errorf("failed to run inference: %w", err)
 		}
-		conversation = append(conversation, message.ToParam())
+		a.conversation = append(a.conversation, message.ToParam())
+
+		// Save assistant message to database
+		if a.currentSessionID > 0 {
+			err = a.saveMessageToDB(message.ToParam())
+			if err != nil {
+				fmt.Printf("Warning: Failed to save assistant message: %s\n", err.Error())
+			}
+		}
 
 		toolResults := []anthropic.ContentBlockParamUnion{}
 		for _, content := range message.Content {
@@ -118,10 +169,37 @@ func (a *Agent) Run(ctx context.Context) error {
 			continue
 		}
 		readUserInput = false
-		conversation = append(conversation, anthropic.NewUserMessage(toolResults...))
+		toolMessage := anthropic.NewUserMessage(toolResults...)
+		a.conversation = append(a.conversation, toolMessage)
+
+		// Save tool results to database
+		if a.currentSessionID > 0 {
+			err = a.saveMessageToDB(toolMessage)
+			if err != nil {
+				fmt.Printf("Warning: Failed to save tool message: %s\n", err.Error())
+			}
+		}
 	}
 
 	return nil
+}
+
+// Helper method to save messages to database
+func (a *Agent) saveMessageToDB(message anthropic.MessageParam) error {
+	if a.currentSessionID <= 0 {
+		return fmt.Errorf("no active session")
+	}
+
+	// Convert message content to JSON for storage
+	contentBytes, err := json.Marshal(message.Content)
+	if err != nil {
+		return fmt.Errorf("failed to marshal message content: %w", err)
+	}
+
+	role := string(message.Role)
+	content := string(contentBytes)
+
+	return a.database.SaveMessage(a.currentSessionID, role, content)
 }
 
 // ------------------------------------------------------------
