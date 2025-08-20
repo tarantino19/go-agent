@@ -22,6 +22,19 @@ type CommandRegistry struct {
 	commands map[string]CommandHandler
 }
 
+// ClearCommand creates a new session
+type ClearCommand struct{}
+
+func (cc *ClearCommand) Description() string {
+	return "Clears the current session and starts a new one."
+}
+
+func (cc *ClearCommand) Execute(args []string, agent *Agent) error {
+	// Reuse the createSession logic from SessionCommand
+	sc := &SessionCommand{}
+	return sc.createSession("", agent)
+}
+
 func NewCommandRegistry() *CommandRegistry {
 	registry := &CommandRegistry{
 		commands: make(map[string]CommandHandler),
@@ -30,6 +43,7 @@ func NewCommandRegistry() *CommandRegistry {
 	// Register built-in commands
 	registry.RegisterCommand("session", &SessionCommand{})
 	registry.RegisterCommand("help", &HelpCommand{registry: registry})
+	registry.RegisterCommand("clear", &ClearCommand{})
 
 	return registry
 }
@@ -327,6 +341,7 @@ func (hc *HelpCommand) Execute(args []string, agent *Agent) error {
 	fmt.Println("  \u001b[94m/session new [name]\u001b[0m - Create new session")
 	fmt.Println("  \u001b[94m/session delete <id>\u001b[0m - Delete session")
 	fmt.Println("  \u001b[94m/session rename <id> <name>\u001b[0m - Rename session")
+	fmt.Println("  \u001b[94m/clear\u001b[0m - Clears the current session and starts a new one.")
 
 	return nil
 }
