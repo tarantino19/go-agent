@@ -182,6 +182,7 @@ func (sc *SessionCommand) switchSession(sessionID int, agent *Agent) error {
 	// Switch to session
 	agent.currentSessionID = sessionID
 	agent.conversation = conversation
+	agent.isFirstQueryInSession = true // Mark as first query for new session
 
 	fmt.Printf("\u001b[92mSwitched to session %d: %s\u001b[0m\n", session.ID, session.Name)
 
@@ -254,6 +255,7 @@ func (sc *SessionCommand) createSession(name string, agent *Agent) error {
 	// Switch to new session
 	agent.currentSessionID = session.ID
 	agent.conversation = []anthropic.MessageParam{} // Start fresh
+	agent.isFirstQueryInSession = true              // Mark as first query for new session
 
 	fmt.Printf("\u001b[92mCreated and switched to new session %d: %s\u001b[0m\n", session.ID, session.Name)
 	return nil
@@ -307,10 +309,7 @@ func (sc *SessionCommand) renameSession(sessionID int, newName string, agent *Ag
 		return fmt.Errorf("session %d not found: %w", sessionID, err)
 	}
 
-	_, err = agent.database.db.Exec(
-		"UPDATE sessions SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-		newName, sessionID,
-	)
+	err = agent.database.RenameSession(sessionID, newName)
 	if err != nil {
 		return fmt.Errorf("failed to rename session: %w", err)
 	}

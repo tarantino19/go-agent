@@ -19,13 +19,14 @@ import (
 //App wide structs
 
 type Agent struct {
-	client           *anthropic.Client
-	getUserMessage   func() (string, bool)
-	tools            []ToolDefinition
-	database         *Database
-	currentSessionID int
-	conversation     []anthropic.MessageParam
-	commandRegistry  *CommandRegistry
+	client                *anthropic.Client
+	getUserMessage        func() (string, bool)
+	tools                 []ToolDefinition
+	database              *Database
+	currentSessionID      int
+	conversation          []anthropic.MessageParam
+	commandRegistry       *CommandRegistry
+	isFirstQueryInSession bool
 }
 
 type ToolDefinition struct {
@@ -70,12 +71,13 @@ func main() {
 
 func NewAgent(client *anthropic.Client, getUserMessage func() (string, bool), tools []ToolDefinition, database *Database) *Agent {
 	agent := &Agent{
-		client:          client,
-		getUserMessage:  getUserMessage,
-		tools:           tools,
-		database:        database,
-		conversation:    []anthropic.MessageParam{},
-		commandRegistry: NewCommandRegistry(),
+		client:                client,
+		getUserMessage:        getUserMessage,
+		tools:                 tools,
+		database:              database,
+		conversation:          []anthropic.MessageParam{},
+		commandRegistry:       NewCommandRegistry(),
+		isFirstQueryInSession: true,
 	}
 
 	// Create or load default session
@@ -105,6 +107,9 @@ func (a *Agent) Run(ctx context.Context) error {
 			if !ok {
 				break
 			}
+
+			// Rename session on first query
+			a.renameSessionOnFirstQuery(userInput)
 
 			// Check if this is a command
 			isCommand, err := a.commandRegistry.ExecuteCommand(userInput, a)
@@ -182,6 +187,23 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// Helper method to rename session on first query
+func (a *Agent) renameSessionOnFirstQuery(query string) {
+	if a.isFirstQueryInSession && a.currentSessionID > 0 {
+		words := strings.Fields(query)
+		newName := strings.Join(words, " ")
+		if len(words) > 15 {
+			newName = strings.Join(words[:15], " ")
+		}
+
+		err := a.database.RenameSession(a.currentSessionID, newName)
+		if err != nil {
+			fmt.Printf("Warning: Failed to rename session: %s\n", err.Error())
+		}
+		a.isFirstQueryInSession = false
+	}
 }
 
 // Helper method to save messages to database

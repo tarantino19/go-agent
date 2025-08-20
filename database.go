@@ -192,6 +192,17 @@ func (d *Database) DeleteSession(sessionID int) error {
 	return tx.Commit()
 }
 
+func (d *Database) RenameSession(sessionID int, newName string) error {
+	_, err := d.db.Exec(
+		"UPDATE sessions SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+		newName, sessionID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to rename session: %w", err)
+	}
+	return nil
+}
+
 func (d *Database) Close() error {
 	return d.db.Close()
 }
