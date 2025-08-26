@@ -252,7 +252,16 @@ func (a *Agent) executeTool(id, name string, input json.RawMessage) anthropic.Co
 	}
 
 	PrintToolExecution(name, string(input))
+
+	// Start loading indicator for tool execution
+	loader := NewLoadingIndicator(fmt.Sprintf("Executing %s...", name))
+	loader.Start()
+
 	response, err := toolDef.Function(input)
+
+	// Stop loading indicator
+	loader.Stop()
+
 	if err != nil {
 		return anthropic.NewToolResultBlock(id, fmt.Sprintf("tool '%s' failed: %s", name, err.Error()), true)
 	}
@@ -271,12 +280,20 @@ func (a *Agent) runInference(ctx context.Context, conversation []anthropic.Messa
 		})
 	}
 
+	// Start loading indicator
+	loader := NewLoadingIndicator("...")
+	loader.Start()
+
 	message, err := a.client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.ModelClaude3_5HaikuLatest,
 		MaxTokens: int64(1024),
 		Messages:  conversation,
 		Tools:     anthropicTools,
 	})
+
+	// Stop loading indicator
+	loader.Stop()
+
 	return message, err
 }
 

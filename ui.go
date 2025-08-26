@@ -222,3 +222,49 @@ func PrintWarning(message string) {
 func PrintSuccess(message string) {
 	fmt.Print(SuccessColor + "✅ " + message + ResetColor + "\n")
 }
+
+// LoadingIndicator represents a loading animation
+type LoadingIndicator struct {
+	message string
+	frames  []string
+	stop    chan bool
+	done    chan bool
+}
+
+// NewLoadingIndicator creates a new loading indicator
+func NewLoadingIndicator(message string) *LoadingIndicator {
+	return &LoadingIndicator{
+		message: message,
+		frames:  []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
+		stop:    make(chan bool),
+		done:    make(chan bool),
+	}
+}
+
+// Start begins the loading animation
+func (li *LoadingIndicator) Start() {
+	go func() {
+		defer close(li.done)
+		frameIndex := 0
+		
+		for {
+			select {
+			case <-li.stop:
+				// Clear the loading line
+				fmt.Print("\r" + strings.Repeat(" ", len(li.message)+10) + "\r")
+				return
+			default:
+				// Print current frame
+				fmt.Printf("\r%s%s %s%s", ClaudeBorderColor, li.frames[frameIndex], li.message, ResetColor)
+				frameIndex = (frameIndex + 1) % len(li.frames)
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+	}()
+}
+
+// Stop ends the loading animation
+func (li *LoadingIndicator) Stop() {
+	close(li.stop)
+	<-li.done // Wait for goroutine to finish
+}
