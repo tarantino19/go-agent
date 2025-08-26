@@ -35,6 +35,19 @@ func (cc *ClearCommand) Execute(args []string, agent *Agent) error {
 	return sc.createSession("", agent)
 }
 
+// QuitCommand exits the program
+type QuitCommand struct{}
+
+func (qc *QuitCommand) Description() string {
+	return "Quit the program"
+}
+
+func (qc *QuitCommand) Execute(args []string, agent *Agent) error {
+	fmt.Println("\u001b[92mGoodbye!\u001b[0m")
+	os.Exit(0)
+	return nil
+}
+
 func NewCommandRegistry() *CommandRegistry {
 	registry := &CommandRegistry{
 		commands: make(map[string]CommandHandler),
@@ -44,6 +57,7 @@ func NewCommandRegistry() *CommandRegistry {
 	registry.RegisterCommand("session", &SessionCommand{})
 	registry.RegisterCommand("help", &HelpCommand{registry: registry})
 	registry.RegisterCommand("clear", &ClearCommand{})
+	registry.RegisterCommand("quit", &QuitCommand{})
 
 	return registry
 }
@@ -341,6 +355,7 @@ func (hc *HelpCommand) Execute(args []string, agent *Agent) error {
 	fmt.Println("  \u001b[94m/session delete <id>\u001b[0m - Delete session")
 	fmt.Println("  \u001b[94m/session rename <id> <name>\u001b[0m - Rename session")
 	fmt.Println("  \u001b[94m/clear\u001b[0m - Clears the current session and starts a new one.")
+	fmt.Println("  \u001b[94m/quit\u001b[0m - Quit the program")
 
 	return nil
 }
