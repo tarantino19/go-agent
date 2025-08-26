@@ -46,7 +46,7 @@ func main() {
 	// Initialize database
 	database, err := NewDatabase("conversations.db")
 	if err != nil {
-		fmt.Printf("Failed to initialize database: %s\n", err.Error())
+		PrintError(fmt.Sprintf("Failed to initialize database: %s", err.Error()))
 		os.Exit(1)
 	}
 	defer database.Close()
@@ -55,7 +55,7 @@ func main() {
 	getUserMessage := func() (string, bool) {
 		if !scanner.Scan() {
 			if err := scanner.Err(); err != nil {
-				fmt.Printf("Error reading input: %s\n", err.Error())
+				PrintError(fmt.Sprintf("Error reading input: %s", err.Error()))
 			}
 			return "", false
 		}
@@ -66,7 +66,7 @@ func main() {
 	agent := NewAgent(&client, getUserMessage, tools, database)
 	err = agent.Run(context.TODO())
 	if err != nil {
-		fmt.Printf("Agent error: %s\n", err.Error())
+		PrintError(fmt.Sprintf("Agent error: %s", err.Error()))
 		os.Exit(1)
 	}
 }
@@ -85,7 +85,7 @@ func NewAgent(client *anthropic.Client, getUserMessage func() (string, bool), to
 	// Create or load default session
 	session, err := database.CreateSession("")
 	if err != nil {
-		fmt.Printf("Warning: Failed to create default session: %s\n", err.Error())
+		PrintWarning(fmt.Sprintf("Failed to create default session: %s", err.Error()))
 		agent.currentSessionID = 0
 	} else {
 		agent.currentSessionID = session.ID
@@ -97,14 +97,12 @@ func NewAgent(client *anthropic.Client, getUserMessage func() (string, bool), to
 //Run main loop
 
 func (a *Agent) Run(ctx context.Context) error {
-	fmt.Println("Chat with Claude (use 'ctrl-c' to quit)")
-	fmt.Println("Tip: Use @filename to include files in your context (supports fuzzy matching)")
-	fmt.Println("Commands: /session, /help")
+	PrintWelcomeMessage()
 
 	readUserInput := true
 	for {
 		if readUserInput {
-			fmt.Print("\u001b[94mYou\u001b[0m: ")
+			PrintPrompt()
 			userInput, ok := a.getUserMessage()
 			if !ok {
 				break
@@ -116,7 +114,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			// Check if this is a command
 			isCommand, err := a.commandRegistry.ExecuteCommand(userInput, a)
 			if err != nil {
-				fmt.Printf("Command error: %s\n", err.Error())
+				PrintError(fmt.Sprintf("Command error: %s", err.Error()))
 				continue
 			}
 			if isCommand {
@@ -126,14 +124,15 @@ func (a *Agent) Run(ctx context.Context) error {
 			// Parse file mentions and include file content
 			processedInput, mentionedFiles, err := parseFileMentions(userInput)
 			if err != nil {
-				fmt.Printf("Error processing file mentions: %s\n", err.Error())
+				PrintError(fmt.Sprintf("Error processing file mentions: %s", err.Error()))
 				continue
 			}
 
 			// Show user which files were included
-			if len(mentionedFiles) > 0 {
-				fmt.Printf("\u001b[92mIncluded files\u001b[0m: %s\n", strings.Join(mentionedFiles, ", "))
-			}
+			PrintIncludedFiles(mentionedFiles)
+
+			// Display a random tip after user input
+			PrintRandomTip()
 
 			userMessage := anthropic.NewUserMessage(anthropic.NewTextBlock(processedInput))
 			a.conversation = append(a.conversation, userMessage)
@@ -142,7 +141,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			if a.currentSessionID > 0 {
 				err = a.saveMessageToDB(userMessage)
 				if err != nil {
-					fmt.Printf("Warning: Failed to save user message: %s\n", err.Error())
+					PrintWarning(fmt.Sprintf("Failed to save user message: %s", err.Error()))
 				}
 			}
 		}
@@ -157,19 +156,27 @@ func (a *Agent) Run(ctx context.Context) error {
 		if a.currentSessionID > 0 {
 			err = a.saveMessageToDB(message.ToParam())
 			if err != nil {
-				fmt.Printf("Warning: Failed to save assistant message: %s\n", err.Error())
+				PrintWarning(fmt.Sprintf("Failed to save assistant message: %s", err.Error()))
 			}
 		}
 
 		toolResults := []anthropic.ContentBlockParamUnion{}
+		var claudeResponse strings.Builder
+
 		for _, content := range message.Content {
 			switch content.Type {
 			case "text":
-				fmt.Printf("\u001b[93mClaude\u001b[0m: %s\n", content.Text)
+				claudeResponse.WriteString(content.Text)
 			case "tool_use":
 				result := a.executeTool(content.ID, content.Name, content.Input)
 				toolResults = append(toolResults, result)
 			}
+		}
+
+		// Display Claude's response in styled box if there's text content
+		if claudeResponse.Len() > 0 {
+			claudeBox := NewClaudeMessageBox(claudeResponse.String())
+			claudeBox.Render()
 		}
 		if len(toolResults) == 0 {
 			readUserInput = true
@@ -183,7 +190,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		if a.currentSessionID > 0 {
 			err = a.saveMessageToDB(toolMessage)
 			if err != nil {
-				fmt.Printf("Warning: Failed to save tool message: %s\n", err.Error())
+				PrintWarning(fmt.Sprintf("Failed to save tool message: %s", err.Error()))
 			}
 		}
 	}
@@ -202,7 +209,7 @@ func (a *Agent) renameSessionOnFirstQuery(query string) {
 
 		err := a.database.RenameSession(a.currentSessionID, newName)
 		if err != nil {
-			fmt.Printf("Warning: Failed to rename session: %s\n", err.Error())
+			PrintWarning(fmt.Sprintf("Failed to rename session: %s", err.Error()))
 		}
 		a.isFirstQueryInSession = false
 	}
@@ -244,7 +251,7 @@ func (a *Agent) executeTool(id, name string, input json.RawMessage) anthropic.Co
 		return anthropic.NewToolResultBlock(id, fmt.Sprintf("tool '%s' not found", name), true)
 	}
 
-	fmt.Printf("\u001b[92mtool\u001b[0m: %s(%s)\n", name, input)
+	PrintToolExecution(name, string(input))
 	response, err := toolDef.Function(input)
 	if err != nil {
 		return anthropic.NewToolResultBlock(id, fmt.Sprintf("tool '%s' failed: %s", name, err.Error()), true)
