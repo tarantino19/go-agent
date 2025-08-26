@@ -17,6 +17,7 @@ Thumbs.db
 
 agent
 /agent
+/goagent
 # Go build / vendor
 bin/
 *.exe
