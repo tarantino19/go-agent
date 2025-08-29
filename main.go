@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/invopop/jsonschema"
@@ -293,6 +294,18 @@ func (a *Agent) runInference(ctx context.Context, conversation []anthropic.Messa
 
 	// Stop loading indicator
 	loader.Stop()
+
+	// Record usage if we got a response
+	if err == nil && message != nil {
+		model := string(message.Model)
+		date := time.Now().Format("2006-01-02")
+		var inTok, outTok int64
+		inTok = message.Usage.InputTokens
+		outTok = message.Usage.OutputTokens
+		if a.database != nil {
+			_ = a.database.AddDailyUsage(date, model, inTok, outTok)
+		}
+	}
 
 	return message, err
 }

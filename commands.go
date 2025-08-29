@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
@@ -58,6 +59,7 @@ func NewCommandRegistry() *CommandRegistry {
 	registry.RegisterCommand("help", &HelpCommand{registry: registry})
 	registry.RegisterCommand("clear", &ClearCommand{})
 	registry.RegisterCommand("quit", &QuitCommand{})
+	registry.RegisterCommand("usage", &UsageCommand{})
 
 	return registry
 }
@@ -332,6 +334,118 @@ func (sc *SessionCommand) renameSession(sessionID int, newName string, agent *Ag
 	return nil
 }
 
+// UsageCommand shows daily token usage
+// Usage: /usage [YYYY-MM-DD]
+// If no date is provided, shows today's usage. Lists model, input, output, total.
+type UsageCommand struct{}
+
+func (uc *UsageCommand) Description() string {
+	return "Show daily token usage (optionally pass a date YYYY-MM-DD or 'all')"
+}
+
+// friendlyModelName converts API model strings like "claude-3-5-haiku-latest" to "haiku 3.5".
+func friendlyModelName(raw string) string {
+	parts := strings.Split(raw, "-")
+	name := ""
+	nums := []string{}
+	for _, p := range parts {
+		if p == "claude" || p == "latest" || p == "preview" || p == "instant" {
+			continue
+		}
+		if _, err := strconv.Atoi(p); err == nil {
+			nums = append(nums, p)
+			continue
+		}
+		if name == "" {
+			name = p
+		}
+	}
+	version := ""
+	if len(nums) >= 2 {
+		version = nums[0] + "." + nums[1]
+	} else if len(nums) == 1 {
+		version = nums[0]
+	}
+	if name != "" && version != "" {
+		return fmt.Sprintf("%s %s", name, version)
+	}
+	if name != "" {
+		return name
+	}
+	return raw
+}
+
+func (uc *UsageCommand) Execute(args []string, agent *Agent) error {
+	date := ""
+	showAll := false
+	if len(args) >= 1 {
+		arg := strings.TrimSpace(args[0])
+		if strings.EqualFold(arg, "all") {
+			showAll = true
+		} else {
+			date = arg
+		}
+	}
+
+	if !showAll && date == "" {
+		date = time.Now().Format("2006-01-02")
+	}
+
+	rows, err := agent.database.ListUsage(date)
+	if err != nil {
+		return fmt.Errorf("failed to get usage: %w", err)
+	}
+	if len(rows) == 0 {
+		when := date
+		if when == "" {
+			when = "all time"
+		}
+		fmt.Printf("No usage recorded for %s\n", when)
+		return nil
+	}
+
+	// Helper to format ints with commas
+	formatInt := func(n int64) string {
+		s := fmt.Sprintf("%d", n)
+		neg := false
+		if strings.HasPrefix(s, "-") {
+			neg = true
+			s = s[1:]
+		}
+		for i := len(s) - 3; i > 0; i -= 3 {
+			s = s[:i] + "," + s[i:]
+		}
+		if neg {
+			s = "-" + s
+		}
+		return s
+	}
+
+	// Helper to format date like 8/19/25
+	formatDate := func(d string) string {
+		if t, err := time.Parse("2006-01-02", d); err == nil {
+			return t.Format("1/2/06")
+		}
+		return d
+	}
+
+	printLine := func(d string, model string, total int64) {
+		fmt.Printf("%s - %s tokens used - model: %s\n", formatDate(d), formatInt(total), friendlyModelName(model))
+	}
+
+	if showAll && date == "" {
+		for _, r := range rows {
+			printLine(r.Date, r.Model, r.TotalTokens)
+		}
+		return nil
+	}
+
+	for _, r := range rows {
+		printLine(date, r.Model, r.TotalTokens)
+	}
+	return nil
+}
+
 // HelpCommand shows available commands
 type HelpCommand struct {
 	registry *CommandRegistry
@@ -356,6 +470,7 @@ func (hc *HelpCommand) Execute(args []string, agent *Agent) error {
 	fmt.Println("  \u001b[94m/session rename <id> <name>\u001b[0m - Rename session")
 	fmt.Println("  \u001b[94m/clear\u001b[0m - Clears the current session and starts a new one.")
 	fmt.Println("  \u001b[94m/quit\u001b[0m - Quit the program")
+	fmt.Println("  \u001b[94m/usage [YYYY-MM-DD|all]\u001b[0m - Show daily token usage in '8/19/25 - 170,000 tokens used - model: haiku 3.5' format")
 
 	return nil
 }

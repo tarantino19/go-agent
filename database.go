@@ -14,6 +14,14 @@ type Database struct {
 	db *sql.DB
 }
 
+type UsageRow struct {
+	Date         string
+	Model        string
+	InputTokens  int64
+	OutputTokens int64
+	TotalTokens  int64
+}
+
 type Session struct {
 	ID        int       `json:"id"`
 	Name      string    `json:"name"`
@@ -61,8 +69,21 @@ func (d *Database) initSchema() error {
 		FOREIGN KEY (session_id) REFERENCES sessions(id)
 	);
 
+	-- Track daily token usage per model
+	CREATE TABLE IF NOT EXISTS usage (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		date TEXT NOT NULL, -- YYYY-MM-DD
+		model TEXT NOT NULL,
+		input_tokens INTEGER NOT NULL DEFAULT 0,
+		output_tokens INTEGER NOT NULL DEFAULT 0,
+		total_tokens INTEGER NOT NULL DEFAULT 0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(date, model)
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id);
 	CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at);
+	CREATE INDEX IF NOT EXISTS idx_usage_date ON usage(date);
 	`
 
 	_, err := d.db.Exec(schema)
@@ -205,6 +226,48 @@ func (d *Database) RenameSession(sessionID int, newName string) error {
 
 func (d *Database) Close() error {
 	return d.db.Close()
+}
+
+// Upsert daily usage by model
+func (d *Database) AddDailyUsage(date, model string, inputTokens, outputTokens int64) error {
+	// total computation happens atomically in SQL
+	_, err := d.db.Exec(`
+		INSERT INTO usage (date, model, input_tokens, output_tokens, total_tokens)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(date, model) DO UPDATE SET
+			input_tokens = input_tokens + excluded.input_tokens,
+			output_tokens = output_tokens + excluded.output_tokens,
+			total_tokens = total_tokens + excluded.total_tokens
+	`, date, model, inputTokens, outputTokens, inputTokens+outputTokens)
+	if err != nil {
+		return fmt.Errorf("failed to upsert usage: %w", err)
+	}
+	return nil
+}
+
+// List usage entries optionally filtered by date or model
+func (d *Database) ListUsage(date string) ([]UsageRow, error) {
+	query := "SELECT date, model, input_tokens, output_tokens, total_tokens FROM usage"
+	args := []any{}
+	if date != "" {
+		query += " WHERE date = ?"
+		args = append(args, date)
+	}
+	query += " ORDER BY date DESC, model ASC"
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query usage: %w", err)
+	}
+	defer rows.Close()
+	var out []UsageRow
+	for rows.Next() {
+		var u UsageRow
+		if err := rows.Scan(&u.Date, &u.Model, &u.InputTokens, &u.OutputTokens, &u.TotalTokens); err != nil {
+			return nil, fmt.Errorf("failed to scan usage: %w", err)
+		}
+		out = append(out, u)
+	}
+	return out, nil
 }
 
 // Helper functions to convert between anthropic messages and database format
