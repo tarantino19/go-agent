@@ -11,6 +11,7 @@ Barebones implementation of a coding agent with persistent conversation sessions
 - Create files
 - Web search
 - Add files as main context for the llm via @
+- Track daily tokens used
 
 ### Session Management
 - **Persistent conversations**: All conversations are automatically saved to a SQLite database
