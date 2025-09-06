@@ -2,6 +2,44 @@
 
 Barebones implementation of a coding agent with persistent conversation sessions.
 
+## Setup
+
+1. **Prerequisites**: Ensure Go 1.24+ is installed.
+
+2. **Clone the repository**:
+   ```bash
+   git clone <your-repo-url>
+   cd go-agent
+   ```
+
+3. **Build the agent**:
+   ```bash
+   go build
+   ```
+
+4. **Move to PATH for global access**:
+   ```bash
+   mkdir -p ~/bin
+   mv agent ~/bin/
+   ```
+   Ensure `~/bin` is in your PATH by adding to `~/.zshrc` (or your shell's rc file):
+   ```bash
+   export PATH="$HOME/bin:$PATH"
+   ```
+   Then reload: `source ~/.zshrc`
+
+5. **Set Anthropic API key**:
+   Add to `~/.zshrc`:
+   ```bash
+   export ANTHROPIC_API_KEY="your_key_here"
+   ```
+   Then `source ~/.zshrc`
+
+6. **Run the agent**:
+   ```bash
+   agent
+   ```
+
 ## Features
 
 ### Core Agent Capabilities
@@ -23,7 +61,7 @@ Barebones implementation of a coding agent with persistent conversation sessions
 ### Basic Chat
 Just run the agent and start chatting:
 ```bash
-./agent
+agent
 ```
 
 ### Session Commands
